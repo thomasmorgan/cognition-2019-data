@@ -1,0 +1,395 @@
+generation_size <- 60
+num_generations <- 40
+total_repeats <- 18
+num_memes <- 8
+library(jsonlite)
+
+# load data
+load_data <- function() {
+  print("Loading data...")
+  print("    > loading psiturk.csv")
+  participants <- read.csv("psiturk.csv")
+  participants <<- participants[order(participants$uniqueid),]
+  print("    > loading node.csv")
+  nodes <- read.csv("node.csv")
+  nodes <<- nodes[order(nodes$id),]
+  print("    > loading info.csv")
+  infos <- read.csv("info.csv")
+  infos <<- infos[order(infos$id),]
+  print("    > loading network.csv")
+  networks <- read.csv("network.csv")
+  networks <<- networks[order(networks$id),]
+  print("    > loading transformation.csv")
+  transformations <- read.csv("transformation.csv")
+  transformations <<- transformations[order(transformations$id),]
+  print("    > loading transmission.csv")
+  transmissions <- read.csv("transmission.csv")
+  transmissions <<- transmissions[order(transmissions$id),]
+  print("    > loading vector.csv")
+  vectors <- read.csv("vector.csv")
+  vectors <<- vectors[order(vectors$id),]
+  total <<- nrow(participants) + nrow(nodes) + nrow(infos) + nrow(networks) + nrow(transformations) + nrow(transmissions) + nrow(vectors)
+}
+
+# check data
+check_data <- function() {
+  print("Checking data")
+  for (p in 1:nrow(participants)) {
+    participant <- participants[p,]
+    p_id <- as.character(participant$uniqueid)
+    p_nodes <- nodes[nodes$participant_id == p_id,]
+    p_status <- participant$status
+    if (p_status < 101) {
+      print("Error: participant status < 101")
+      print(p_id)
+    }
+    if (p_status == 101) {
+      if ("t" %in% p_nodes$failed) {
+        print("Error: participant with status 101 has failed nodes")
+        print(p_id)
+      }
+      if (nrow(p_nodes) != total_repeats) {
+        print("Error: participant with status 101 does not have correct number of nodes")
+        print(p_id)
+      }
+    }
+    if (p_status > 101) {
+      if ("f" %in% p_nodes$failed) {
+        print("Error: participant with status > 101 has non-failed nodes")
+        print(p_id)
+      }
+    }
+  }
+  for (n in 1:nrow(networks)) {
+    network <- networks[n,]
+    n_id <- network$id
+    n_nodes <- nodes[nodes$network_id == n_id & nodes$failed == "f" & nodes$type == "amoeba_agent",]
+    if (nrow(n_nodes) != num_generations*generation_size) {
+      print("Error: network does not contain correct number of non-failed nodes")
+      print(n_id)
+      print(nrow(n_nodes))
+    }
+  }
+  # check all passed nodes have the right number of memes:
+  node_ids <- nodes$id[nodes$failed == "f" & nodes$type == "amoeba_agent"]
+  memes <- infos$origin_id[infos$type == "meme"]
+  for (n in 1:length(node_ids)) {
+    num_memes <- sum(memes == node_ids[n])
+    if (num_memes != 8) {
+      print(paste("node ", node_ids[n], " does not have 8 memes, it has ", num_memes))
+    }
+  }
+  print("All checks passed!")
+}
+
+create_data_table <- function() {
+  print("Creating data table")
+  print("    > pre-processing")
+  
+  # get the passed participants and their nodes
+  passed_participants <- participants[participants$status == 101, ]
+  passed_nodes <- nodes[nodes$participant_id %in% passed_participants$uniqueid,]
+  
+  # get the info_id
+  response_infos <- infos[infos$type == "meme" & infos$origin_id %in% passed_nodes$id,]
+  N <- nrow(response_infos)
+  info_id <- response_infos$id
+  
+  # get the node and network ids
+  node_id <- response_infos$origin_id
+  network_id <- response_infos$network_id
+  
+  # get the node's genome
+  genes <- infos[infos$type == "amoeba_gene" & infos$origin_id %in% passed_nodes$id,]
+  gene_origins <- genes$origin_id
+  genomes <- as.character(genes$contents)
+  node_genome <- vector(length=N)
+  for (i in 1:N) {
+    node_genome[i] <- genomes[gene_origins == node_id[i]]
+  }
+  
+  # get the participant id
+  participant_id <- vector(length=N)
+  unique_id <- vector(length=N)
+  generation <- vector(length=N)
+  passed_node_ids <- passed_nodes$id
+  passed_node_participants <- as.character(passed_nodes$participant_id)
+  passed_node_generations <- as.numeric(as.character(passed_nodes$property2))
+  unique_participants <- unique(passed_node_participants)
+  for (i in 1:N) {
+    unique_id[i] <- passed_node_participants[passed_node_ids == node_id[i]]
+    participant_id[i] <- match(unique_id[i], unique_participants)
+    generation[i] <- passed_node_generations[passed_node_ids == node_id[i]]
+  }
+  
+  # expand the network table with extra details
+  num_nets <- nrow(networks)
+  net_case <- vector(length=num_nets)
+  net_primary_dimension <- vector(length=num_nets)
+  net_primary_value <- vector(length=num_nets)
+  net_secondary_dimension <- vector(length=num_nets)
+  net_secondary_value <- vector(length=num_nets)
+  net_tertiary_dimension <- vector(length=num_nets)
+  net_tertiary_value <- vector(length=num_nets)
+  net_role <- as.character(networks$role)
+  exception <- matrix(nrow=num_nets, ncol=2)
+  for (i in 1:num_nets) {
+    source_id = nodes[nodes$type == "amoeba_source" & nodes$network_id == i,]$id
+    amoeba_list = fromJSON(as.character(infos[infos$origin_id == source_id,]$contents))
+    net_case[i] <- amoeba_list$case
+    net_primary_dimension[i] <- amoeba_list$primary_dimension
+    net_primary_value[i] <- amoeba_list$primary_value
+    if (amoeba_list$case > 1) {
+      net_secondary_dimension[i] <- amoeba_list$secondary_dimension
+      net_secondary_value[i] <- amoeba_list$secondary_value
+    } else {
+      net_secondary_dimension[i] <- "NA"
+      net_secondary_value[i] <- "NA"
+    }
+    if (amoeba_list$case > 2) {
+      net_tertiary_dimension[i] <- amoeba_list$tertiary_dimension
+      net_tertiary_value[i] <- amoeba_list$tertiary_value
+    } else {
+      net_tertiary_dimension[i] <- "NA"
+      net_tertiary_value[i] <- "NA"
+    }
+    
+    if (amoeba_list$case == 5) {
+      if (net_secondary_value[i] == "blue") {
+        if (net_tertiary_value[i] == "green") {
+          exception[i,] <- c(7, 8)
+        } else if (net_tertiary_value[i] == "purple") {
+          exception[i,] <- c(5, 6)
+        } else if (net_tertiary_value[i] == "TRUE") {
+          exception[i,] <- c(6, 8)
+        } else if (net_tertiary_value[i] == "FALSE") {
+          exception[i,] <- c(5, 7)
+        } else {
+          print("ERROR CASE 1")
+        }
+      } else if (net_secondary_value[i] == "orange") {
+        if (net_tertiary_value[i] == "green") {
+          exception[i,] <- c(3, 4)
+        } else if (net_tertiary_value[i] == "purple") {
+          exception[i,] <- c(1, 2)
+        } else if (net_tertiary_value[i] == "TRUE") {
+          exception[i,] <- c(2, 4)
+        } else if (net_tertiary_value[i] == "FALSE") {
+          exception[i,] <- c(1, 3)
+        } else {
+          print("ERROR CASE 2")
+        }
+      } else if (net_secondary_value[i] == "green") {
+        if (net_tertiary_value[i] == "blue") {
+          exception[i,] <- c(7, 8)
+        } else if (net_tertiary_value[i] == "orange") {
+          exception[i,] <- c(3, 4)
+        } else if (net_tertiary_value[i] == "TRUE") {
+          exception[i,] <- c(4, 8)
+        } else if (net_tertiary_value[i] == "FALSE") {
+          exception[i,] <- c(3, 7)
+        } else {
+          print("ERROR CASE 3")
+          print(net_secondary_value[i])
+          print(net_tertiary_value[i])
+        }
+      } else if (net_secondary_value[i] == "purple") {
+        if (net_tertiary_value[i] == "blue") {
+          exception[i,] <- c(5, 6)
+        } else if (net_tertiary_value[i] == "orange") {
+          exception[i,] <- c(1, 2)
+        } else if (net_tertiary_value[i] == "TRUE") {
+          exception[i,] <- c(2, 6)
+        } else if (net_tertiary_value[i] == "FALSE") {
+          exception[i,] <- c(1, 5)
+        } else {
+          print("ERROR CASE 4")
+        }
+      } else if (net_secondary_value[i] == "TRUE") {
+        if (net_tertiary_value[i] == "blue") {
+          exception[i,] <- c(6, 8)
+        } else if (net_tertiary_value[i] == "orange") {
+          exception[i,] <- c(2, 4)
+        } else if (net_tertiary_value[i] == "green") {
+          exception[i,] <- c(4, 8)
+        } else if (net_tertiary_value[i] == "purple") {
+          exception[i,] <- c(2, 6)
+        } else {
+          print("ERROR CASE 5")
+        }
+      } else if (net_secondary_value[i] == "FALSE") {
+        if (net_tertiary_value[i] == "blue") {
+          exception[i,] <- c(5, 7)
+        } else if (net_tertiary_value[i] == "orange") {
+          exception[i,] <- c(1, 3)
+        } else if (net_tertiary_value[i] == "green") {
+          exception[i,] <- c(3, 7)
+        } else if (net_tertiary_value[i] == "purple") {
+          exception[i,] <- c(1, 5)
+        } else {
+          print("ERROR CASE 6")
+        }
+      } else {
+        print("ERROR CASE 7")
+      }
+    }
+  }
+  networks <<- cbind(networks, net_case)
+  # get case, dimensions, values and role
+  case <- net_case[network_id]
+  primary_dimension <- net_primary_dimension[network_id]
+  primary_value <- net_primary_value[network_id]
+  secondary_dimension <- net_secondary_dimension[network_id]
+  secondary_value <- net_secondary_value[network_id]
+  tertiary_dimension <- net_tertiary_dimension[network_id]
+  tertiary_value <- net_tertiary_value[network_id]
+  role <- net_role[network_id]
+  
+  # get amoeba properties, decision and exception
+  gene <- vector(length=N)
+  body_color <- vector(length=N)
+  nucleus_color <- vector(length=N)
+  spots <- vector(length=N)
+  good <- vector(length=N)
+  decision <- vector(length=N)
+  is_exception <- vector(length=N)
+  amoeba_id <- vector(length=N)
+  for (i in 1:N) {
+    amoeba = fromJSON(as.character(response_infos[i,]$contents))
+    body_color[i] <- amoeba$amoeba$body_color
+    nucleus_color[i] <- amoeba$amoeba$nucleus_color
+    spots[i] <- amoeba$amoeba$spots
+    good[i] <- amoeba$amoeba$good
+    decision[i] <- amoeba$decision
+    is_exception[i] <- (amoeba$amoeba$id+1) %in% exception[network_id[i],]
+    amoeba_id[i] <- amoeba$amoeba$id
+    gene[i] <- substring(node_genome[i], amoeba_id[i]+1, amoeba_id[i]+1)
+  }
+  gene <- as.numeric(gene)
+  right <- decision == good
+  
+  # create the new table
+  print("    > binding columns")
+  agent_table <<- data.frame(unique_id, participant_id, network_id, role, node_id, node_genome, generation, info_id, amoeba_id, gene, case, primary_dimension, primary_value, secondary_dimension, secondary_value, tertiary_dimension, tertiary_value, body_color, nucleus_color, spots, is_exception, good, decision, right)
+  colnames(agent_table) <<- c("unique_id", "participant", "network", "role", "node", "genome", "generation", "id", "amoeba_id", "gene", "case", "primary_dimension", "primary_value", "secondary_dimension", "secondary_value", "tertiary_dimension", "tertiary_value", "body_color", "nucleus_color", "spots", "exception", "good", "decision", "right")
+  save(agent_table, file="agent_table.txt")
+}
+
+plot_graphs <- function() {
+  
+  # plot participant performance by pass
+  these_participants <- participants[participants$status %in% c(101, 102),]
+  performance <- vector(length=nrow(these_participants))
+  case_1_nets <- networks[networks$net_case==1 & networks$role=="experiment",]$id
+  for (i in 1:nrow(these_participants)) {
+    pid <- these_participants[i,]$uniqueid
+    ns <- nodes[as.character(nodes$participant_id) == pid & nodes$network_id %in% case_1_nets,]
+    performance[i] <- mean(ns$property3)/8
+  }
+  hist(performance, breaks=10)
+  
+  # plot an overall evolution plot
+  plot(c(0,1)~c(0,1), col="white", xlab="generation", xlim=c(0, num_generations-1), ylab="frequency of 1 allele", ylim=c(0, 1))
+  gens <- c(0:(num_generations-1))
+  freqs <- gens
+  for (i in 1:length(freqs)) {
+    freqs[i] <- mean(agent_table$gene[agent_table$generation == gens[i]])
+  }
+  lines(freqs~gens)
+  lines(c(0.25, 0.25)~c(0, (num_generations-1)), col="black", lty=2)
+  
+  # plot an evolution plot by case
+  plot(c(0,1)~c(0,1), col="white", xlab="Generation", xlim=c(0, num_generations-1), ylab="Frequency of beneficial allele", ylim=c(0.2, 0.8), type="b")
+  lines(c(0.25, 0.25)~c(0, (num_generations-1)), col="black", lty=2)
+  gens <- c(0:(num_generations-1))
+  freqs <- gens
+  cases <- c(1, 2, 5)
+  colors <- c("green", "blue", "red")
+  for (c in 1:3) {
+    for (i in 1:length(freqs)) {
+      freqs[i] <- mean(agent_table$gene[agent_table$generation == gens[i] & agent_table$case == cases[c]])
+    }
+    if (c <= 3) {
+      lines(freqs~gens, col=colors[c], type="b")
+    }
+  }
+  for (i in 1:length(freqs)) {
+    freqs[i] <- mean(agent_table$gene[agent_table$generation == gens[i] & agent_table$case == cases[c]& agent_table$exception == FALSE])
+  }
+  lines(freqs~gens, col="red", lty=2, type="b")
+  for (i in 1:length(freqs)) {
+    freqs[i] <- mean(agent_table$gene[agent_table$generation == gens[i] & agent_table$case == cases[c]& agent_table$exception == TRUE])
+  }
+  lines(freqs~gens, col="red", lty=3, type="b")
+  legend(0, 0.8, c("Case V - exception", "Case V - non-exception", "Case II", "Case I"), lty=c(3, 2, 1, 1), col=c("red", "red", "blue", "green"), bty="n")
+  
+  # plot an evolution plot by case, with error bars
+  gens <- c(0:(num_generations-1))
+  freqs <- list(vector(), vector(), vector())
+  ses <- list(vector(), vector(), vector())
+  cases <- c(1, 2, 5)
+  case_1_nets <- unique(agent_table$network[agent_table$case == 1 & agent_table$role == "experiment"])
+  case_2_nets <- unique(agent_table$network[agent_table$case == 2 & agent_table$role == "experiment"])
+  case_5_nets <- unique(agent_table$network[agent_table$case == 5 & agent_table$role == "experiment"])
+  nets <- list(case_1_nets, case_2_nets, case_5_nets)
+  for (c in 1:3) {
+    for (g in gens) {
+      data <- c()
+      for (n in nets[[c]]) {
+        data <- c(data, mean(agent_table$gene[agent_table$network == n & agent_table$generation == g]))
+      }
+      freqs[[c]] <- c(freqs[[c]], mean(data))
+      ses[[c]] <- c(ses[[c]], sd(data)/(length(data)^0.5))
+    }
+  }
+  
+  plot(c(0,1)~c(0,1), col="white", xlab="Generation", xlim=c(0, num_generations-1), ylab="Frequency of beneficial allele", ylim=c(0.2, 0.8), type="b")
+  lines(c(0.25, 0.25)~c(0, (num_generations-1)), col="black", lty=2)
+  lines(freqs[[1]]~gens, col="green")
+  lines(freqs[[1]] - 1.96*ses[[1]]~gens, col="green")
+  lines(freqs[[1]] + 1.96*ses[[1]]~gens, col="green")
+  lines(freqs[[2]]~gens, col="blue")
+  lines(freqs[[2]] - 1.96*ses[[2]]~gens, col="blue")
+  lines(freqs[[2]] + 1.96*ses[[2]]~gens, col="blue")
+  lines(freqs[[3]]~gens, col="red")
+  lines(freqs[[3]] - 1.96*ses[[3]]~gens, col="red")
+  lines(freqs[[3]] + 1.96*ses[[3]]~gens, col="red")
+  
+  # plot an evolution plot by exception, with error bars
+  gens <- c(0:(num_generations-1))
+  freqs <- list(vector(), vector())
+  ses <- list(vector(), vector())
+  cases <- c(5)
+  case_5_nets <- unique(agent_table$network[agent_table$case == 5 & agent_table$role == "experiment"])
+  exception <- c(0, 1)
+  nets <- list(case_5_nets)
+  for (ex in 0:1) {
+    for (g in gens) {
+      data <- c()
+      for (n in nets[[1]]) {
+        data <- c(data, mean(agent_table$gene[agent_table$network == n & agent_table$generation == g & agent_table$exception == ex]))
+      }
+      freqs[[ex + 1]] <- c(freqs[[ex + 1]], mean(data))
+      ses[[ex + 1]] <- c(ses[[ex + 1]], sd(data)/(length(data)^0.5))
+    }
+  }
+  
+  plot(c(0,1)~c(0,1), col="white", xlab="Generation", xlim=c(0, num_generations-1), ylab="Frequency of beneficial allele", ylim=c(0.2, 0.8), type="b")
+  lines(c(0.25, 0.25)~c(0, (num_generations-1)), col="black", lty=2)
+  lines(freqs[[1]]~gens, col="green")
+  lines(freqs[[1]] - 1.96*ses[[1]]~gens, col="green")
+  lines(freqs[[1]] + 1.96*ses[[1]]~gens, col="green")
+  lines(freqs[[2]]~gens, col="blue")
+  lines(freqs[[2]] - 1.96*ses[[2]]~gens, col="blue")
+  lines(freqs[[2]] + 1.96*ses[[2]]~gens, col="blue")
+}
+
+
+load_data()
+check_data()
+create_data_table()
+plot_graphs()
+print("Finished")
+
+
+
